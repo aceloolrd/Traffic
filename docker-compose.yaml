@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: traffic_zookeeper
+    restart: always
+    ports:
+      - "2182:2181"
+    healthcheck:
+      test: [ "CMD", "nc", "-vz", "localhost", "2181" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: 'yes'
+      ZOOKEEPER_SASL_ENABLED: 'false'
+    networks:
+      - prod_network
+
+  kafka:
+    image: wurstmeister/kafka
+    container_name: traffic_kafka
+    restart: always
+    ports:
+      - "9092:9092"
+    volumes:
+      - ./services/kafka/kafka_server_jaas.conf:/kafka_server_jaas.conf
+      - ./services/kafka/init-kafka-broker.sh:/etc/init-kafka-broker.sh
+    command: /bin/bash /etc/init-kafka-broker.sh
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: 'yes'
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf"
+      ZOOKEEPER_SASL_ENABLED: 'false'
+      KAFKA_LOG_RETENTION_HOURS: 24 # удаление сообщений через 24 часа
+      KAFKA_USERNAME: ${KAFKA_USERNAME}
+      KAFKA_PASSWORD: ${KAFKA_PASSWORD}
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "nc", "-vz", "localhost", "9092" ] 
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - prod_network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: traffic_kafka_ui
+    restart: always
+    ports:
+      - "9001:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:29092"
+    depends_on:
+      - kafka
+    networks:
+      - prod_network
+      
+  grafana:
+    container_name: traffic_grafana
+    image: grafana/grafana:latest
+    environment:
+      TZ: "Europe/Moscow"
+      GF_ALLOW_EMBEDDING: "true"
+      GF_PANELS_DISABLE_SANITIZE_HTML: "true"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    restart: unless-stopped
+    ports:
+      - "3111:3000"
+    volumes:
+      - ./services/grafana:/var/lib/grafana
+    networks:
+      - prod_network
+
+  influxdb:
+    container_name: traffic_influxdb
+    restart: always
+    image: influxdb:1.8
+    ports:
+      - "8087:8086"
+    environment:
+      - INFLUX_DB=influx
+      - INFLUXDB_ADMIN_USER=${INFLUXDB_ADMIN_USER}
+      - INFLUXDB_ADMIN_PASSWORD=${INFLUXDB_ADMIN_PASSWORD}
+      - INFLUXDB_RETENTION_POLICY_AUTOCREATE=true
+      - INFLUXDB_RETENTION_DURATION=30d
+    volumes:
+      - ./services/influxdb_data:/var/lib/influxdb
+    networks:
+      - prod_network
+
+  telegraf:
+    container_name: traffic_telegraf
+    restart: always
+    image: telegraf
+    depends_on:
+      - influxdb
+    volumes:
+      - ./services/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    links:
+      - influxdb
+    ports:
+      - "8126:8125"
+    networks:
+      - prod_network
+
+  nginx:
+    image: nginx:latest
+    container_name: traffic_nginx
+    restart: always
+    volumes:
+      - ./services/nginx/nginx.conf:/etc/nginx/nginx.conf 
+    ports:
+      - 8009:8009
+    networks:
+      - prod_network
+
+  traffic_analyzer_camera_1:
+    build: .
+    image: traffic_analyzer:latest 
+    restart: always
+    container_name: traffic_analyzer_camera_1
+    command: python main_optimized.py
+    environment:
+      - VIDEO_SRC=test_videos/test_video.mp4
+      - ROADS_JSON=configs/entry_exit_lanes.json
+      - TOPIC_NAME=statistics_1
+      - CAMERA_ID=1
+    volumes:
+      - ./configs:/app/configs
+      - ./weights:/app/weights
+      - ./test_videos:/app/test_videos
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - prod_network
+
+  traffic_analyzer_camera_2:
+    image: traffic_analyzer:latest 
+    restart: always
+    container_name: traffic_analyzer_camera_2
+    command: python main_optimized.py
+    environment:
+      - VIDEO_SRC=test_videos/longer_example.mp4
+      - ROADS_JSON=configs/entry_exit_lanes.json
+      - TOPIC_NAME=statistics_2
+      - CAMERA_ID=2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./configs:/app/configs
+      - ./weights:/app/weights
+      - ./test_videos:/app/test_videos
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - prod_network
+
+networks:
+  prod_network:
+    driver: bridge
