@@ -27,3 +27,10 @@ readme.md
 main_optimized.py
 main_stream_optimized.py
 main.py
+
+test_videos
+*pt
+*pth
+*jpg
+*png
+*jpeg
